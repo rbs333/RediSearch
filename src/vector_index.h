@@ -25,6 +25,7 @@
 #define VECSIM_METRIC_IP "IP"
 #define VECSIM_METRIC_L2 "L2"
 #define VECSIM_METRIC_COSINE "COSINE"
+#define VECSIM_METRIC_COSINE_SIMILARITY "COSINE_SIMILARITY"
 
 #define VECSIM_ALGORITHM_BF "FLAT"
 #define VECSIM_ALGORITHM_HNSW "HNSW"
@@ -191,6 +192,7 @@ extern "C" {
 #endif
 
 QueryIterator *createMetricIteratorFromVectorQueryResults(VecSimQueryReply *reply,
+                                                          VecSimMetric metric,
                                                           bool yields_metric,
                                                           bool sorted_by_id);
 #ifdef __cplusplus

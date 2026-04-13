@@ -15,6 +15,21 @@
 
 #define VECTOR_SCORE(p) (p->data.tag == RSResultData_Metric ? IndexResult_NumValue(p) : IndexResult_NumValue(AggregateResult_GetUnchecked(IndexResult_AggregateRefUnchecked(p), 0)))
 
+static bool VecSimMetric_UsesCosineInternalDistance(VecSimMetric metric) {
+  return metric == VecSimMetric_Cosine || metric == VecSimMetric_CosineSimilarity;
+}
+
+static double VecSimCosineDistanceToSimilarity(double distance) {
+  double similarity = 1.0 - distance;
+  if (similarity < -1.0) {
+    return -1.0;
+  }
+  if (similarity > 1.0) {
+    return 1.0;
+  }
+  return similarity;
+}
+
 static int cmpVecSimResByScore(const void *p1, const void *p2, const void *udata) {
   const RSIndexResult *e1 = p1, *e2 = p2;
   double score1 = VECTOR_SCORE(e1), score2 = VECTOR_SCORE(e2);
@@ -277,7 +292,7 @@ static VecSimQueryReply_Code computeDistances_RAM(HybridIterator *hr) {
   void *qvector = hr->query.vector;
 
   // Normalize query vector for cosine metric (RAM path only - disk handles this internally).
-  if (hr->indexMetric == VecSimMetric_Cosine) {
+  if (VecSimMetric_UsesCosineInternalDistance(hr->indexMetric)) {
     qvector = rm_malloc(hr->dimension * VecSimType_sizeof(hr->vecType));
     memcpy(qvector, hr->query.vector, hr->dimension * VecSimType_sizeof(hr->vecType));
     VecSim_Normalize(qvector, hr->dimension, hr->vecType);
@@ -480,6 +495,10 @@ static IteratorStatus HR_ReadKnnUnsortedSingle(HybridIterator *hr) {
   }
 
   hr->base.lastDocId = hr->base.current->docId;
+  if (hr->indexMetric == VecSimMetric_CosineSimilarity) {
+    IndexResult_SetNumValue(hr->base.current,
+                            VecSimCosineDistanceToSimilarity(IndexResult_NumValue(hr->base.current)));
+  }
   ResultMetrics_Add(hr->base.current, hr->ownKey, RSValue_NewNumber(IndexResult_NumValue(hr->base.current)));
   return ITERATOR_OK;
 }

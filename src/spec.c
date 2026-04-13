@@ -667,6 +667,8 @@ static int parseVectorField_GetMetric(ArgsCursor *ac, VecSimMetric *metric) {
     *metric = VecSimMetric_L2;
   else if (!strcasecmp(VECSIM_METRIC_COSINE, metricStr))
     *metric = VecSimMetric_Cosine;
+  else if (!strcasecmp(VECSIM_METRIC_COSINE_SIMILARITY, metricStr))
+    *metric = VecSimMetric_CosineSimilarity;
   else
     return AC_ERR_ENOENT;
   return AC_OK;

@@ -78,6 +78,7 @@ static inline VectorNormFunction getVectorNormalizationFunction(VecSimMetric met
     case VecSimMetric_IP:
       return VectorNorm_IP;
     case VecSimMetric_Cosine:
+    case VecSimMetric_CosineSimilarity:
       return VectorNorm_Cosine;
     default:
       // This should never happen - all VecSimMetric values should be handled
