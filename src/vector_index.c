@@ -16,19 +16,9 @@
 #include "util/threadpool_api.h"
 #include "redis_index.h"
 #include "search_disk.h"
+#include "vector_normalization.h"
 
 #include <string.h>
-
-static double VecSimCosineDistanceToSimilarity(double distance) {
-  double similarity = 1.0 - distance;
-  if (similarity < -1.0) {
-    return -1.0;
-  }
-  if (similarity > 1.0) {
-    return 1.0;
-  }
-  return similarity;
-}
 
 #if defined(__x86_64__) && defined(__GLIBC__)
 #include <cpuid.h>
@@ -144,6 +134,29 @@ static int VectorQuery_ValidateDiskHybridPolicy(const QueryEvalCtx *q, const Vec
   return REDISMODULE_OK;
 }
 
+static int VectorQuery_ValidateRangeRadius(const VectorQuery *vq, VecSimMetric metric,
+                                           QueryError *status) {
+  RS_ASSERT(vq->type == VECSIM_QT_RANGE);
+
+  if (metric == VecSimMetric_CosineSimilarity) {
+    if (vq->range.radius < -1.0 || vq->range.radius > 1.0) {
+      QueryError_SetWithoutUserDataFmt(status, QUERY_ERROR_CODE_INVAL,
+                                       "Error parsing vector similarity query: range query radius"
+                                       " (%g) for COSINE_SIMILARITY must be in [-1, 1]",
+                                       vq->range.radius);
+      return REDISMODULE_ERR;
+    }
+  } else if (vq->range.radius < 0) {
+    QueryError_SetWithoutUserDataFmt(status, QUERY_ERROR_CODE_INVAL,
+                                     "Error parsing vector similarity query: negative radius"
+                                     " (%g) given in a range query",
+                                     vq->range.radius);
+    return REDISMODULE_ERR;
+  }
+
+  return REDISMODULE_OK;
+}
+
 QueryIterator *NewVectorIterator(QueryEvalCtx *q, VectorQuery *vq, QueryIterator *child_it) {
   RedisSearchCtx *ctx = q->sctx;
   // Cast is safe: openVectorIndex only mutates fieldSpec when create_if_missing is true.
@@ -205,21 +218,11 @@ QueryIterator *NewVectorIterator(QueryEvalCtx *q, VectorQuery *vq, QueryIterator
         return NULL;
       }
       double internal_radius = vq->range.radius;
-      if (metric == VecSimMetric_CosineSimilarity) {
-        if (vq->range.radius < -1.0 || vq->range.radius > 1.0) {
-          QueryError_SetWithoutUserDataFmt(q->status, QUERY_ERROR_CODE_INVAL,
-                                 "Error parsing vector similarity query: range query radius"
-                                 " (%g) for COSINE_SIMILARITY must be in [-1, 1]",
-                                 vq->range.radius);
-          return NULL;
-        }
-        internal_radius = 1.0 - vq->range.radius;
-      } else if (vq->range.radius < 0) {
-        QueryError_SetWithoutUserDataFmt(q->status, QUERY_ERROR_CODE_INVAL,
-                               "Error parsing vector similarity query: negative radius"
-                               " (%g) given in a range query",
-                               vq->range.radius);
+      if (VectorQuery_ValidateRangeRadius(vq, metric, q->status) != REDISMODULE_OK) {
         return NULL;
+      }
+      if (metric == VecSimMetric_CosineSimilarity) {
+        internal_radius = 1.0 - vq->range.radius;
       }
       if (VecSim_ResolveQueryParams(vecsim, vq->params.params, array_len(vq->params.params),
                                     &qParams, QUERY_TYPE_RANGE, q->status) != VecSim_OK)  {
@@ -255,6 +258,14 @@ int VectorQuery_EvalParams(dict *params, QueryNode *node, unsigned int dialectVe
       return REDISMODULE_ERR;
     }
   }
+
+  if (node->vn.vq->type == VECSIM_QT_RANGE) {
+    VecSimMetric metric = getVecSimMetricFromVectorField(node->vn.vq->field);
+    if (VectorQuery_ValidateRangeRadius(node->vn.vq, metric, status) != REDISMODULE_OK) {
+      return REDISMODULE_ERR;
+    }
+  }
+
   return REDISMODULE_OK;
 }
 

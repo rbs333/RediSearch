@@ -64,6 +64,26 @@ static inline double VectorNorm_Cosine(double cosine_distance) {
 }
 
 /**
+ * Cosine Distance to Cosine Similarity
+ * Formula: similarity = 1 - distance, clamped to [-1, 1]
+ *
+ * Used at the API boundary for fields declared with COSINE_SIMILARITY: the
+ * internal execution path stores and ranks by cosine distance; this converts
+ * the externalized score back to similarity. Clamping guards against minor
+ * floating-point drift outside the theoretical [0, 2] distance range.
+ */
+static inline double VecSimCosineDistanceToSimilarity(double distance) {
+  double similarity = 1.0 - distance;
+  if (similarity < -1.0) {
+    return -1.0;
+  }
+  if (similarity > 1.0) {
+    return 1.0;
+  }
+  return similarity;
+}
+
+/**
  * Get the appropriate normalization function for a given VecSimMetric
  * This function is used during pipeline construction to resolve the metric
  * and select the corresponding normalization function.
