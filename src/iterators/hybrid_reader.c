@@ -12,6 +12,7 @@
 #include "VecSim/query_results.h"
 #include "iterators_rs.h"
 #include "query.h"
+#include "vector_normalization.h"
 
 #define VECTOR_SCORE(p) (p->data.tag == RSResultData_Metric ? IndexResult_NumValue(p) : IndexResult_NumValue(AggregateResult_GetUnchecked(IndexResult_AggregateRefUnchecked(p), 0)))
 
@@ -277,9 +278,12 @@ static VecSimQueryReply_Code computeDistances_RAM(HybridIterator *hr) {
   void *qvector = hr->query.vector;
 
   // Normalize query vector for cosine metric (RAM path only - disk handles this internally).
-  if (hr->indexMetric == VecSimMetric_Cosine) {
-    qvector = rm_malloc(hr->dimension * VecSimType_sizeof(hr->vecType));
-    memcpy(qvector, hr->query.vector, hr->dimension * VecSimType_sizeof(hr->vecType));
+  if (VecSimMetric_IsCosineFamily(hr->indexMetric)) {
+    size_t query_blob_size = VecSimParams_GetQueryBlobSize(hr->vecType, hr->dimension,
+                                                           hr->indexMetric);
+    RS_ASSERT(query_blob_size >= hr->query.vecLen);
+    qvector = rm_malloc(query_blob_size);
+    memcpy(qvector, hr->query.vector, hr->query.vecLen);
     VecSim_Normalize(qvector, hr->dimension, hr->vecType);
   }
 
@@ -423,6 +427,13 @@ static VecSimQueryReply_Code prepareResults(HybridIterator *hr) {
 
 // In KNN mode, the results will return sorted by ascending order of the distance
 // (better score first), while in hybrid mode, the results will return in descending order.
+//
+// Note: for VecSimMetric_CosineSimilarity, the value carried here remains cosine
+// distance (i.e. not converted to similarity). Hybrid queries are intentionally
+// left to the hybrid scoring pipeline downstream (see vector_normalization.h
+// and pipeline_construction.c), which expects cosine-distance input. Only the
+// non-hybrid KNN path (HR_ReadKnnUnsortedSingle) translates to similarity at
+// the API boundary.
 static IteratorStatus HR_ReadHybridUnsortedSingle(HybridIterator *hr) {
   if (hr->base.atEOF) {
     return ITERATOR_EOF;
@@ -480,6 +491,14 @@ static IteratorStatus HR_ReadKnnUnsortedSingle(HybridIterator *hr) {
   }
 
   hr->base.lastDocId = hr->base.current->docId;
+  // Non-hybrid KNN: translate the internally-stored cosine distance to
+  // cosine similarity for fields declared with COSINE_SIMILARITY. KNN ordering
+  // is preserved because minimizing distance is equivalent to maximizing
+  // similarity (the heap was already populated in distance order).
+  if (hr->indexMetric == VecSimMetric_CosineSimilarity) {
+    IndexResult_SetNumValue(hr->base.current,
+                            VecSimCosineDistanceToSimilarity(IndexResult_NumValue(hr->base.current)));
+  }
   ResultMetrics_Add(hr->base.current, hr->ownKey, RSValue_NewNumber(IndexResult_NumValue(hr->base.current)));
   return ITERATOR_OK;
 }

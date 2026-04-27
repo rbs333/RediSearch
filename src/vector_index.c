@@ -16,6 +16,7 @@
 #include "util/threadpool_api.h"
 #include "redis_index.h"
 #include "search_disk.h"
+#include "vector_normalization.h"
 
 #include <string.h>
 
@@ -66,7 +67,8 @@ VecSimIndex *openVectorIndex(RedisModuleCtx *ctx, FieldSpec *fieldSpec, bool cre
   return fieldSpec->vectorOpts.vecSimIndex;
 }
 
-QueryIterator *createMetricIteratorFromVectorQueryResults(VecSimQueryReply *reply, const bool yields_metric, const bool sorted_by_id) {
+QueryIterator *createMetricIteratorFromVectorQueryResults(VecSimQueryReply *reply, VecSimMetric metric,
+                                                          const bool yields_metric, const bool sorted_by_id) {
   size_t res_num = VecSimQueryReply_Len(reply);
   if (res_num == 0) {
     VecSimQueryReply_Free(reply);
@@ -81,7 +83,11 @@ QueryIterator *createMetricIteratorFromVectorQueryResults(VecSimQueryReply *repl
     VecSimQueryResult *res = VecSimQueryReply_IteratorNext(iter);
     docIdsList[i] = VecSimQueryResult_GetId(res);
     if (yields_metric) {
-      metricList[i] = VecSimQueryResult_GetScore(res);
+      double score = VecSimQueryResult_GetScore(res);
+      if (metric == VecSimMetric_CosineSimilarity) {
+        score = VecSimCosineDistanceToSimilarity(score);
+      }
+      metricList[i] = score;
     }
   }
   VecSimQueryReply_IteratorFree(iter);
@@ -122,6 +128,29 @@ static int VectorQuery_ValidateDiskHybridPolicy(const QueryEvalCtx *q, const Vec
   if (!VectorQuery_HasParam(vq, VECSIM_HYBRID_POLICY, sizeof(VECSIM_HYBRID_POLICY) - 1)) {
     QueryError_SetError(q->status, QUERY_ERROR_CODE_INVAL,
                         "Redis Flex pre-filtered vector queries currently require explicit HYBRID_POLICY");
+    return REDISMODULE_ERR;
+  }
+
+  return REDISMODULE_OK;
+}
+
+static int VectorQuery_ValidateRangeRadius(const VectorQuery *vq, VecSimMetric metric,
+                                           QueryError *status) {
+  RS_ASSERT(vq->type == VECSIM_QT_RANGE);
+
+  if (metric == VecSimMetric_CosineSimilarity) {
+    if (vq->range.radius < -1.0 || vq->range.radius > 1.0) {
+      QueryError_SetWithoutUserDataFmt(status, QUERY_ERROR_CODE_INVAL,
+                                       "Error parsing vector similarity query: range query radius"
+                                       " (%g) for COSINE_SIMILARITY must be in [-1, 1]",
+                                       vq->range.radius);
+      return REDISMODULE_ERR;
+    }
+  } else if (vq->range.radius < 0) {
+    QueryError_SetWithoutUserDataFmt(status, QUERY_ERROR_CODE_INVAL,
+                                     "Error parsing vector similarity query: negative radius"
+                                     " (%g) given in a range query",
+                                     vq->range.radius);
     return REDISMODULE_ERR;
   }
 
@@ -188,12 +217,12 @@ QueryIterator *NewVectorIterator(QueryEvalCtx *q, VectorQuery *vq, QueryIterator
                                vq->range.vecLen, (dim * VecSimType_sizeof(type)));
         return NULL;
       }
-      if (vq->range.radius < 0) {
-        QueryError_SetWithoutUserDataFmt(q->status, QUERY_ERROR_CODE_INVAL,
-                               "Error parsing vector similarity query: negative radius"
-                               " (%g) given in a range query",
-                               vq->range.radius);
+      double internal_radius = vq->range.radius;
+      if (VectorQuery_ValidateRangeRadius(vq, metric, q->status) != REDISMODULE_OK) {
         return NULL;
+      }
+      if (metric == VecSimMetric_CosineSimilarity) {
+        internal_radius = 1.0 - vq->range.radius;
       }
       if (VecSim_ResolveQueryParams(vecsim, vq->params.params, array_len(vq->params.params),
                                     &qParams, QUERY_TYPE_RANGE, q->status) != VecSim_OK)  {
@@ -201,7 +230,7 @@ QueryIterator *NewVectorIterator(QueryEvalCtx *q, VectorQuery *vq, QueryIterator
       }
       qParams.timeoutCtx = &(TimeoutCtx){ .timeout = q->sctx->time.timeout, .counter = 0 };
       VecSimQueryReply *results =
-          VecSimIndex_RangeQuery(vecsim, vq->range.vector, vq->range.radius,
+          VecSimIndex_RangeQuery(vecsim, vq->range.vector, internal_radius,
                                  &qParams, vq->range.order);
       if (VecSimQueryReply_GetCode(results) == VecSim_QueryReply_TimedOut) {
         VecSimQueryReply_Free(results);
@@ -210,7 +239,7 @@ QueryIterator *NewVectorIterator(QueryEvalCtx *q, VectorQuery *vq, QueryIterator
       }
       bool yields_metric = vq->scoreField != NULL;
       bool sorted_by_id = vq->range.order == BY_ID;
-      return createMetricIteratorFromVectorQueryResults(results, yields_metric, sorted_by_id);
+      return createMetricIteratorFromVectorQueryResults(results, metric, yields_metric, sorted_by_id);
     }
   }
   return NULL;
@@ -229,6 +258,14 @@ int VectorQuery_EvalParams(dict *params, QueryNode *node, unsigned int dialectVe
       return REDISMODULE_ERR;
     }
   }
+
+  if (node->vn.vq->type == VECSIM_QT_RANGE) {
+    VecSimMetric metric = getVecSimMetricFromVectorField(node->vn.vq->field);
+    if (VectorQuery_ValidateRangeRadius(node->vn.vq, metric, status) != REDISMODULE_OK) {
+      return REDISMODULE_ERR;
+    }
+  }
+
   return REDISMODULE_OK;
 }
 
@@ -310,6 +347,7 @@ const char *VecSimMetric_ToString(VecSimMetric metric) {
     case VecSimMetric_IP: return VECSIM_METRIC_IP;
     case VecSimMetric_L2: return VECSIM_METRIC_L2;
     case VecSimMetric_Cosine: return VECSIM_METRIC_COSINE;
+    case VecSimMetric_CosineSimilarity: return VECSIM_METRIC_COSINE_SIMILARITY;
   }
   return NULL;
 }
